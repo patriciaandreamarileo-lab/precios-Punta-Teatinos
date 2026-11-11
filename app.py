@@ -77,7 +77,10 @@ div[data-testid="stMetricValue"] {
 def convertir_numero(columna):
 
     if pd.api.types.is_numeric_dtype(columna):
-        return pd.to_numeric(columna, errors="coerce")
+        return pd.to_numeric(
+            columna,
+            errors="coerce"
+        )
 
     def limpiar_valor(valor):
 
@@ -104,7 +107,10 @@ def convertir_numero(columna):
             valor = valor.replace(".", "")
             valor = valor.replace(",", ".")
 
-        return pd.to_numeric(valor, errors="coerce")
+        return pd.to_numeric(
+            valor,
+            errors="coerce"
+        )
 
     return columna.apply(limpiar_valor)
 
@@ -118,12 +124,22 @@ def convertir_fecha(columna):
     )
 
 
+def limpiar_codigo(columna):
+
+    return (
+        columna
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+
 # ==========================================================
 # 4. CARGA Y PREPARACIÓN DE DATOS
 # ==========================================================
 
 @st.cache_data
-def cargar_datos():
+def cargar_datos(fecha_modificacion):
 
     if not ARCHIVO.exists():
 
@@ -200,9 +216,13 @@ def cargar_datos():
         df["CANTIDAD"]
     )
 
-    df["CANTIDAD EN UM ENTRADA"] = convertir_numero(
-        df["CANTIDAD EN UM ENTRADA"]
-    )
+    if "CANTIDAD EN UM ENTRADA" in df.columns:
+
+        df["CANTIDAD EN UM ENTRADA"] = convertir_numero(
+            df["CANTIDAD EN UM ENTRADA"]
+        )
+
+    # Normalizar moneda
 
     df["MONEDA"] = (
         df["MONEDA"]
@@ -211,16 +231,15 @@ def cargar_datos():
         .str.upper()
     )
 
-    df["Material"] = (
+    # Normalizar códigos de material y pedido.
+    # Esto evita diferencias como 50002406 y 50002406.0.
+
+    df["Material"] = limpiar_codigo(
         df["Material"]
-        .astype("string")
-        .str.strip()
     )
 
-    df["Pedido"] = (
+    df["Pedido"] = limpiar_codigo(
         df["Pedido"]
-        .astype("string")
-        .str.strip()
     )
 
     df["Descripción material"] = (
@@ -254,13 +273,18 @@ def cargar_datos():
     # ------------------------------------------------------
 
     # Una misma OC puede tener varias posiciones.
-    # La primera posición contiene el precio, moneda
-    # y fecha de creación.
+    # Algunas posiciones pueden tener vacíos en precio,
+    # moneda o fecha de creación.
     #
-    # Recuperamos esos datos únicamente dentro de la
-    # combinación Pedido + Material.
+    # Recuperamos esos datos dentro de cada combinación:
+    # Pedido + Material.
     #
-    # NO copiamos cantidades ni precios de otros materiales.
+    # Se completa hacia adelante y hacia atrás.
+    #
+    # IMPORTANTE:
+    # - No se mezclan órdenes de compra diferentes.
+    # - No se mezclan materiales diferentes.
+    # - No se copian cantidades entre posiciones.
 
     columnas_recuperar = [
         "PRECIO",
@@ -275,7 +299,22 @@ def cargar_datos():
                 ["Pedido", "Material"],
                 sort=False
             )[columna]
-            .ffill()
+            .transform(
+                lambda serie: serie.ffill().bfill()
+            )
+        )
+
+    # Recuperar fecha de contabilización si existe
+    if "FECHA CONTABILIZACIÓN" in df.columns:
+
+        df["FECHA CONTABILIZACIÓN"] = (
+            df.groupby(
+                ["Pedido", "Material"],
+                sort=False
+            )["FECHA CONTABILIZACIÓN"]
+            .transform(
+                lambda serie: serie.ffill().bfill()
+            )
         )
 
     # ------------------------------------------------------
@@ -299,7 +338,8 @@ def cargar_datos():
             "CANTIDAD",
             "PRECIO UNITARIO",
             "MONEDA",
-            "Material"
+            "Material",
+            "Pedido"
         ]
     )
 
@@ -379,7 +419,9 @@ def formato_precio(valor, moneda):
 
 try:
 
-    df = cargar_datos()
+    df = cargar_datos(
+        ARCHIVO.stat().st_mtime_ns
+    )
 
 except Exception as error:
 
@@ -538,7 +580,9 @@ variaciones = []
 
 for material, grupo in filtrado.groupby("Material"):
 
-    grupo = grupo.sort_values("FECHA OC")
+    grupo = grupo.sort_values(
+        ["FECHA OC", "Pedido", "POSICIÓN"]
+    )
 
     if len(grupo) < 2:
         continue
@@ -740,7 +784,7 @@ def mostrar_analisis_individual(
     ].copy()
 
     detalle = detalle.sort_values(
-        "FECHA OC"
+        ["FECHA OC", "Pedido", "POSICIÓN"]
     )
 
     # ------------------------------------------------------
@@ -958,4 +1002,3 @@ st.caption(
     "La variación porcentual compara el primer y último "
     "precio unitario registrado dentro del período seleccionado."
 )
-
